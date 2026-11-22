@@ -33,6 +33,8 @@ import kotlin.concurrent.thread
 
 private const val TAG = "bootstrap"
 private const val ROOTFS_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+// A phone-local copy served over loopback; falls back to ROOTFS_URL when nothing is listening.
+private const val LOCAL_ROOTFS_URL = "http://127.0.0.1:8080/ArchLinuxARM-aarch64-latest.tar.gz"
 private const val TARBALL = "ArchLinuxARM-aarch64-latest.tar.gz"
 
 /** Attempts per network step before setup (or an update) reports a failure. */
@@ -480,16 +482,28 @@ class Bootstrap(
         val validator = File(context.cacheDir, "$TARBALL.version")
         requireSpace(TARBALL_SPACE - (if (partial.exists()) partial.length() else 0L) + SYSTEM_SPACE)
         report(Stage.Download, text(R.string.linux_step_download), 0f)
-        val conn = openHttp(ROOTFS_URL)
-        connection = conn
-        try {
-            checkCancelled()
-            download(conn, partial, validator)
-        } finally {
-            connection = null
-            conn.disconnect()
+        var downloaded = false
+        var failure: IOException? = null
+        for (url in listOf(LOCAL_ROOTFS_URL, ROOTFS_URL)) {
+            val conn = openHttp(url, connectTimeout = 5_000)
+            connection = conn
+            try {
+                checkCancelled()
+                download(conn, partial, validator)
+                downloaded = true
+                break
+            } catch (e: IOException) {
+                if (e is NoRetry) throw e
+                failure = e
+                partial.delete()
+                validator.delete()
+            } finally {
+                connection = null
+                conn.disconnect()
+            }
         }
         checkCancelled()
+        if (!downloaded) throw failure ?: IOException("rootfs download failed")
         // Only a complete download is kept for a retry.
         check(partial.renameTo(target)) { text(R.string.linux_error_move_download) }
         validator.delete()
